@@ -34,7 +34,7 @@ price-bell --help
 
 ## 通知通道
 
-`notifications.serverchan` 与 `notifications.ntfy` 可以同时启用，也可以分别关闭。每个通道有自己的 `daily_budget`，`0` 表示不限额。敏感值建议通过 `*_env` 指定的环境变量提供。
+`notifications.serverchan` 与 `notifications.ntfy` 可以同时启用，也可以分别关闭。`daily_push_budget: 0` 表示全局不限额；每个通道还有独立的 `daily_budget`，`0` 同样表示不限额。敏感值建议通过 `*_env` 指定的环境变量提供。
 
 Google Play 版 ntfy 连接 `ntfy.sh` 时可走 FCM。topic 本质上相当于密码，请使用足够长的随机值；敏感场景建议使用 ntfy 账户权限或自建服务。
 
