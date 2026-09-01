@@ -1,0 +1,52 @@
+{
+  "poll_interval": 3,
+  "quote_source": {
+    "provider": "tencent",
+    "endpoint": "https://qt.gtimg.cn/q={codes}",
+    "timeout": 5
+  },
+  "market_hours": ["09:15-11:35", "12:55-15:10"],
+  "timezone_offset_hours": 8,
+  "remind_interval_minutes": 30,
+  "rearm_margin_pct": 0.5,
+  "min_trigger_gap_minutes": 15,
+  "daily_push_budget": 0,
+  "reminder_budget_reserve": 1,
+  "state_file": "state.json",
+  "log_file": "logs/price_bell.log",
+  "log_level": "INFO",
+  "notifications": {
+    "serverchan": {
+      "enabled": false,
+      "sendkey": "",
+      "sendkey_env": "SERVERCHAN_SENDKEY",
+      "endpoint": "https://sct3api.ftqq.com/{key}.send",
+      "daily_budget": 5
+    },
+    "ntfy": {
+      "enabled": false,
+      "base_url": "https://ntfy.sh",
+      "topic": "",
+      "topic_env": "NTFY_TOPIC",
+      "token": "",
+      "token_env": "NTFY_TOKEN",
+      "username": "",
+      "username_env": "NTFY_USERNAME",
+      "password": "",
+      "password_env": "NTFY_PASSWORD",
+      "priority": 5,
+      "tags": ["chart_with_upwards_trend"],
+      "daily_budget": 0
+    }
+  },
+  "bells": [
+    {
+      "code": "sh600000",
+      "name": "示例股票",
+      "rules": [
+        {"op": ">=", "price": 10.0, "action": "复核原计划"},
+        {"op": "<=", "price": 8.0, "action": "检查风险"}
+      ]
+    }
+  ]
+}
