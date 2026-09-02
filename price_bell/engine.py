@@ -24,7 +24,7 @@ class Event(object):
     __slots__ = ("kind", "code", "name", "rule", "quote", "remind_no")
 
     def __init__(self, kind, code, name, rule, quote, remind_no=0):
-        self.kind = kind            # trigger=穿越/补发 | reminder=区内重复提醒
+        self.kind = kind            # trigger=穿越/补发 | reminder=区内提醒 | exit=离场
         self.code = code
         self.name = name
         self.rule = rule
@@ -47,6 +47,8 @@ class BellEngine(object):
                     "op": r["op"],
                     "price": r["price"],
                     "action": r["action"],
+                    "level": r.get("level", "default"),
+                    "channels": r.get("channels"),
                     "remind_minutes": r["remind_interval_minutes"]
                         or cfg["remind_interval_minutes"],
                 })
@@ -70,9 +72,11 @@ class BellEngine(object):
             if q is None:
                 continue
             st = rstates.setdefault(r["id"], {
-                "in_zone": False, "last_notify": 0, "count_today": 0})
+                "in_zone": False, "last_notify": 0, "count_today": 0,
+                "exit_pending": False})
             hit = self._hit(r["op"], q.price, r["price"])
             if hit and not st["in_zone"]:
+                st["exit_pending"] = False
                 gap = self.cfg.get("min_trigger_gap_minutes", 15) * 60
                 if st.get("last_notify") and now - st["last_notify"] < gap:
                     st["in_zone"] = True
@@ -102,11 +106,16 @@ class BellEngine(object):
                     really_out = q.price < r["price"] - margin
                 if really_out:
                     st["in_zone"] = False
-                    exits.append((r, q))
+                    if self.cfg.get("notify_on_exit_zone"):
+                        st["exit_pending"] = True
+                    exits.append(Event("exit", r["code"], r["name"], r, q))
                     log.info("离开触发区(滞回%.2f%%), 重新武装: %s 现价%.2f vs %s%.2f",
                              self.cfg.get("rearm_margin_pct", 0.5),
                              r["name"], q.price, r["op"], r["price"])
                 # 滞回带内徘徊: 保持in_zone, 既不报也不重新武装
+            elif not hit and not st["in_zone"] and st.get("exit_pending"):
+                # 上次离场通知发送失败，继续补发；成功后由 mark_sent 清除。
+                exits.append(Event("exit", r["code"], r["name"], r, q))
         return events, exits
 
     def select_within_budget(self, events, state):
@@ -122,7 +131,7 @@ class BellEngine(object):
                 log.warning("今日推送额度已用完(%d条), 后续事件仅记日志", budget)
                 self._last_budget_warn = self.clock()
             return []
-        triggers = [e for e in events if e.kind == "trigger"]
+        triggers = [e for e in events if e.kind in ("trigger", "exit")]
         reminders = [e for e in events if e.kind == "reminder"]
         chosen = list(triggers)
         if remaining > reserve:
@@ -134,16 +143,26 @@ class BellEngine(object):
     def format_message(self, events, state):
         t = time.gmtime(self.clock() + self.cfg["timezone_offset_hours"] * 3600)
         now_s = "%02d:%02d" % (t.tm_hour, t.tm_min)
-        title = "股价铃 | %d条提醒 %s" % (len(events), now_s)
+        if events and all(e.kind == "exit" for e in events):
+            title = "股价铃 | %d条离场 %s" % (len(events), now_s)
+        else:
+            title = "股价铃 | %d条提醒 %s" % (len(events), now_s)
         blocks = []
         for e in events:
             arrow = "▲" if e.rule["op"] == ">=" else "▼"
-            tag = "首次触发" if e.kind == "trigger" else "第%d次提醒" % e.remind_no
+            if e.kind == "exit":
+                arrow = "↩"
+                tag = "离开触发区，已重新武装"
+            elif e.kind == "trigger":
+                tag = "首次触发"
+            else:
+                tag = "第%d次提醒" % e.remind_no
             lines = [
                 "**%s %s(%s)**" % (arrow, e.name, e.code[2:]),
-                "现价 **%.2f** %s 阈值 %.2f · %s" % (e.quote.price, e.rule["op"], e.rule["price"], tag),
+                "现价 **%.2f** · 阈值 %s %.2f · %s" % (
+                    e.quote.price, e.rule["op"], e.rule["price"], tag),
             ]
-            if e.rule["action"]:
+            if e.rule["action"] and e.kind != "exit":
                 lines.append("→ %s" % e.rule["action"])
             blocks.append((NL * 2).join(lines))
         budget = self.cfg["daily_push_budget"]
@@ -160,8 +179,12 @@ class BellEngine(object):
         rstates = state["rules"]
         for e in events:
             st = rstates[e.rule["id"]]
-            st["last_notify"] = now
-            st["count_today"] = st.get("count_today", 0) + 1
+            if e.kind == "exit":
+                st["exit_pending"] = False
+                st["last_exit_notify"] = now
+            else:
+                st["last_notify"] = now
+                st["count_today"] = st.get("count_today", 0) + 1
 
     def mark_deferred(self, events, state, now=None):
         """事件被预算拦截时调用: 只重置计时器防止每周期刷屏, 不计已发次数。"""
@@ -170,4 +193,7 @@ class BellEngine(object):
         for e in events:
             st = rstates.get(e.rule["id"])
             if st is not None:
-                st["last_notify"] = now
+                if e.kind == "exit":
+                    st["exit_pending"] = False
+                else:
+                    st["last_notify"] = now

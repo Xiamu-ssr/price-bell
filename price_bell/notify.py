@@ -173,7 +173,12 @@ class MultiPusher(object):
     def send(self, title, desp="", short="", state=None, only=None):
         state = state if state is not None else {}
         channel_state = state.setdefault("channels", {})
-        wanted = None if not only or only == "all" else {only}
+        if not only or only == "all":
+            wanted = None
+        elif isinstance(only, str):
+            wanted = {only}
+        else:
+            wanted = set(only)
         delivered, skipped, failures = [], [], []
         attempted = 0
         for channel in self.channels:

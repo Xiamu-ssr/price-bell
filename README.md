@@ -8,6 +8,8 @@
 - 区内定时复报，离场后重新武装
 - 滞回与防抖，避免阈值附近反复横跳
 - 同周期事件合并，通道预算彼此独立
+- 按级别或单条规则路由通知通道，支持离场通知
+- `bells` 轻量行情快查与 `notify` 文本通知出口
 - 配置、状态、日志分离；适合 systemd、容器和 Agent Harness
 
 ## 使用
@@ -21,6 +23,9 @@ export NTFY_TOPIC='replace-with-a-long-random-topic'
 
 python3 -m price_bell validate
 python3 -m price_bell check
+python3 -m price_bell bells
+python3 -m price_bell bells --json
+python3 -m price_bell notify --level info --title '午间心跳' --message '监控正常'
 python3 -m price_bell test-push --channel ntfy
 python3 -m price_bell run
 ```
@@ -35,6 +40,10 @@ price-bell --help
 ## 通知通道
 
 `notifications.serverchan` 与 `notifications.ntfy` 可以同时启用，也可以分别关闭。`daily_push_budget: 0` 表示全局不限额；每个通道还有独立的 `daily_budget`，`0` 同样表示不限额。敏感值建议通过 `*_env` 指定的环境变量提供。
+
+`notification_routes` 把 `default/info/critical` 等自定义级别映射到通道；规则可用 `level` 选择路由，也可用 `channels` 单独覆盖。旧配置未声明这些字段时仍向全部已启用通道发送。`notify_on_exit_zone: true` 会在价格越过滞回带、规则重新武装时通知；发送失败会继续补发。
+
+ntfy 的 `base_url` 可直接改为自建服务地址，无需更换行情源或规则引擎。
 
 Google Play 版 ntfy 连接 `ntfy.sh` 时可走 FCM。topic 本质上相当于密码，请使用足够长的随机值；敏感场景建议使用 ntfy 账户权限或自建服务。
 

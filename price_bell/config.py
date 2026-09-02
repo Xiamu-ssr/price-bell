@@ -20,6 +20,9 @@ DEFAULTS = {
     "daily_push_budget": 0,
     "reminder_budget_reserve": 1,
     "notify_on_exit_zone": False,
+    "notification_routes": {
+        "default": "all",
+    },
     "state_file": "state.json",
     "log_file": "logs/price_bell.log",
     "log_level": "INFO",
@@ -51,6 +54,8 @@ DEFAULTS = {
 }
 
 VALID_OPS = (">=", "<=")
+VALID_CHANNELS = ("serverchan", "ntfy")
+ROUTE_NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
 
 class ConfigError(Exception):
@@ -83,6 +88,23 @@ def _resolve_value(section, key):
         if value:
             return value
     return str(section.get(key) or "").strip()
+
+
+def _normalize_channels(value, label):
+    if value == "all" or value is None:
+        return None
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not value:
+        raise ConfigError("%s 必须是 all 或非空通知通道列表" % label)
+    out = []
+    for item in value:
+        channel = str(item).strip().lower()
+        if channel not in VALID_CHANNELS:
+            raise ConfigError("%s 存在未知通知通道: %r" % (label, item))
+        if channel not in out:
+            out.append(channel)
+    return out
 
 
 def load_config(path):
@@ -128,6 +150,20 @@ def load_config(path):
     if not enabled_channels:
         raise ConfigError("至少启用一个 notifications 通道：serverchan 或 ntfy")
     cfg["enabled_channels"] = enabled_channels
+
+    raw_routes = cfg.get("notification_routes") or {}
+    if not isinstance(raw_routes, dict):
+        raise ConfigError("notification_routes 必须是对象")
+    routes = {}
+    for raw_name, raw_channels in raw_routes.items():
+        name = str(raw_name).strip().lower()
+        if not ROUTE_NAME_RE.match(name):
+            raise ConfigError("非法通知级别: %r" % raw_name)
+        routes[name] = _normalize_channels(
+            raw_channels, "notification_routes.%s" % name)
+    routes.setdefault("default", None)
+    cfg["notification_routes"] = routes
+
     bells = []
     for i, b in enumerate(cfg["bells"]):
         code = _norm_code(b.get("code", ""))
@@ -144,11 +180,22 @@ def load_config(path):
                 price = float(r.get("price"))
             except (TypeError, ValueError):
                 raise ConfigError("%s 存在非法price: %r" % (code, r.get("price")))
+            level = str(r.get("level") or "default").strip().lower()
+            if not ROUTE_NAME_RE.match(level):
+                raise ConfigError("%s 存在非法level: %r" % (code, r.get("level")))
+            channels = None
+            if "channels" in r:
+                channels = _normalize_channels(
+                    r.get("channels"), "%s rule.channels" % code)
+                if channels is None:
+                    channels = "all"
             norm_rules.append({
                 "op": op,
                 "price": price,
                 "action": r.get("action") or "",
                 "remind_interval_minutes": r.get("remind_interval_minutes"),
+                "level": level,
+                "channels": channels,
             })
         bells.append({"code": code, "name": name, "rules": norm_rules})
     cfg["bells"] = bells

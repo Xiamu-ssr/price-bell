@@ -12,6 +12,12 @@
   "min_trigger_gap_minutes": 15,
   "daily_push_budget": 0,
   "reminder_budget_reserve": 1,
+  "notify_on_exit_zone": true,
+  "notification_routes": {
+    "default": "all",
+    "info": ["ntfy"],
+    "critical": ["serverchan", "ntfy"]
+  },
   "state_file": "state.json",
   "log_file": "logs/price_bell.log",
   "log_level": "INFO",
@@ -44,8 +50,8 @@
       "code": "sh600000",
       "name": "示例股票",
       "rules": [
-        {"op": ">=", "price": 10.0, "action": "复核原计划"},
-        {"op": "<=", "price": 8.0, "action": "检查风险"}
+        {"op": ">=", "price": 10.0, "action": "复核原计划", "level": "info"},
+        {"op": "<=", "price": 8.0, "action": "检查风险", "level": "critical"}
       ]
     }
   ]

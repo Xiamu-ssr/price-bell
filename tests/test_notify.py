@@ -79,6 +79,15 @@ def main():
     result = partial.send("t", "d", state={})
     assert result.ok and result.delivered_channels == ["ntfy"]
 
+    only_ntfy = MultiPusher([
+        NotificationChannel("serverchan", bad, 0),
+        NotificationChannel("ntfy", good, 0),
+    ])
+    before_bad = bad.calls
+    result = only_ntfy.send("t", "d", state={}, only=["ntfy"])
+    assert result.ok and result.delivered_channels == ["ntfy"]
+    assert bad.calls == before_bad
+
     print("通知通道测试全部通过 ✔")
     return 0
 

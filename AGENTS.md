@@ -4,5 +4,6 @@
 - 了解配置字段时只读 `config.example.json`。
 - 修改配置后先运行 `price-bell validate --config config.json`，再运行 `price-bell check --config config.json`。
 - 常驻实例由进程管理器托管时，不得从会话中重复启动第二个 `price-bell run`。
-- 部署提供 `price-bellctl` 时，使用 `status/check/restart/logs/version` 管理，不直接操作后台 PID。
+- 部署提供 `price-bellctl` 时，使用 `status/check/bells/notify/restart/logs/version` 管理，不直接操作后台 PID。
+- `notify` 只发送用户明确给出的文本；不得读取环境变量、配置凭证或其他秘密拼入通知。
 - 保留 `state.json` 与 `logs/`；升级代码不得清空提醒状态。

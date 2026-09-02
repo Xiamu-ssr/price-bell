@@ -7,6 +7,7 @@
   python3 -m price_bell run                   常驻运行
 """
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -74,6 +75,37 @@ def build(cfg, verbose=False):
     return engine, pusher, source, store
 
 
+def channels_for_level(cfg, level="default", explicit=None):
+    if explicit and explicit != "all":
+        return [explicit]
+    if explicit == "all":
+        return None
+    routes = cfg.get("notification_routes") or {}
+    return routes.get(level, routes.get("default"))
+
+
+def channels_for_event(cfg, event):
+    explicit = event.rule.get("channels")
+    if explicit == "all":
+        return None
+    if explicit is not None:
+        return explicit
+    return channels_for_level(cfg, event.rule.get("level", "default"))
+
+
+def group_events_by_channels(cfg, events):
+    groups = []
+    indexes = {}
+    for event in events:
+        channels = channels_for_event(cfg, event)
+        key = tuple(channels or ())
+        if key not in indexes:
+            indexes[key] = len(groups)
+            groups.append((channels, []))
+        groups[indexes[key]][1].append(event)
+    return groups
+
+
 def push_events(cfg, engine, pusher, events, state):
     chosen = engine.select_within_budget(events, state)
     dropped = [e for e in events if e not in chosen]
@@ -81,19 +113,26 @@ def push_events(cfg, engine, pusher, events, state):
         engine.mark_deferred(dropped, state)
     if not chosen:
         return False
-    title, desp, short = engine.format_message(chosen, state)
-    res = pusher.send(title, desp, short, state=state)
-    if res.ok:
-        engine.mark_sent(chosen, state)
-        log.info("已推送 %d 条事件(合并为1条消息) | 通道=%s | 今日提醒=%d",
-                 len(chosen), ",".join(res.delivered_channels), state["sent_today"])
-        return True
-    if not res.attempted:
-        engine.mark_deferred(chosen, state)
-        log.warning("通知通道无剩余额度，本轮事件只记状态: %s", res.message)
-        return False
-    log.error("推送失败(下周期自动补发): %s", res.message)
-    return False
+    any_ok = False
+    for channels, grouped in group_events_by_channels(cfg, chosen):
+        budget = cfg["daily_push_budget"]
+        if budget > 0 and state["sent_today"] >= budget:
+            engine.mark_deferred(grouped, state)
+            log.warning("全局通知额度已用完，本轮%d条路由事件只记状态", len(grouped))
+            continue
+        title, desp, short = engine.format_message(grouped, state)
+        res = pusher.send(title, desp, short, state=state, only=channels)
+        if res.ok:
+            engine.mark_sent(grouped, state)
+            any_ok = True
+            log.info("已推送 %d 条事件(合并为1条消息) | 通道=%s | 今日提醒=%d",
+                     len(grouped), ",".join(res.delivered_channels), state["sent_today"])
+        elif not res.attempted:
+            engine.mark_deferred(grouped, state)
+            log.warning("通知通道无剩余额度，本轮事件只记状态: %s", res.message)
+        else:
+            log.error("推送失败(下周期自动补发): %s", res.message)
+    return any_ok
 
 
 def cmd_run(args):
@@ -134,11 +173,9 @@ def cmd_run(args):
                 log.debug("非当日行情(休市/节假日/停牌): %s", ",".join(stale))
             if fresh:
                 events, exits = engine.evaluate(fresh, state)
-                for r, q in exits:
-                    if cfg["notify_on_exit_zone"]:
-                        log.info("(离场推送已在配置中开启, 当前版本仅记日志)")
-                if events:
-                    push_events(cfg, engine, pusher, events, state)
+                pending = events + (exits if cfg["notify_on_exit_zone"] else [])
+                if pending:
+                    push_events(cfg, engine, pusher, pending, state)
             store.save(state)
             time.sleep(interval)
         except KeyboardInterrupt:
@@ -177,11 +214,12 @@ def cmd_check(args):
         print("%-10s %-8s %8.2f %+7.2f%%   %s" % (
             bell["code"], q.name, q.price, q.change_pct, " ".join(descs)))
     print()
-    events, _ = engine.evaluate(quotes, state)
-    if not events:
+    events, exits = engine.evaluate(quotes, state)
+    pending = events + (exits if cfg["notify_on_exit_zone"] else [])
+    if not pending:
         print("当前无触发事件。")
         return 0
-    chosen = engine.select_within_budget(events, state)
+    chosen = engine.select_within_budget(pending, state)
     if not chosen:
         print("有 %d 条事件但被预算拦截。" % len(events))
         return 0
@@ -189,10 +227,106 @@ def cmd_check(args):
     print("将推送(合并后1条): %s" % title)
     print(desp)
     if args.push:
-        ok = push_events(cfg, engine, pusher, events, state)
+        ok = push_events(cfg, engine, pusher, pending, state)
         store.save(state)
         print("实际推送: %s" % ("成功" if ok else "失败"))
     return 0
+
+
+def _bell_rows(cfg, quotes):
+    rows = []
+    for bell in cfg["bells"]:
+        q = quotes.get(bell["code"])
+        row = {"code": bell["code"], "name": bell["name"], "quote": None, "rules": []}
+        if q is not None:
+            row["name"] = q.name or bell["name"]
+            row["quote"] = {
+                "price": q.price, "change_pct": q.change_pct,
+                "date": q.date, "datetime": q.dt,
+            }
+            for rule in bell["rules"]:
+                hit = BellEngine._hit(rule["op"], q.price, rule["price"])
+                distance = abs(q.price - rule["price"]) / rule["price"] * 100.0
+                row["rules"].append({
+                    "op": rule["op"], "price": rule["price"], "hit": hit,
+                    "distance_pct": distance, "level": rule.get("level", "default"),
+                })
+        rows.append(row)
+    return rows
+
+
+def cmd_bells(args):
+    cfg = load_config(args.config)
+    _, _, source, _ = build(cfg, args.verbose)
+    quotes = source.fetch([b["code"] for b in cfg["bells"]])
+    rows = _bell_rows(cfg, quotes)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, separators=(",", ":")))
+        return 0
+    for row in rows:
+        q = row["quote"]
+        if q is None:
+            print("%s %-8s [无行情]" % (row["code"][2:], row["name"]))
+            continue
+        bits = []
+        for rule in row["rules"]:
+            if rule["hit"]:
+                bits.append("%s%.2f 已触发" % (rule["op"], rule["price"]))
+            else:
+                bits.append("%s%.2f 距%.1f%%" % (
+                    rule["op"], rule["price"], rule["distance_pct"]))
+        print("%s %-8s %.2f (%+.2f%%) | %s" % (
+            row["code"][2:], row["name"], q["price"], q["change_pct"],
+            "；".join(bits)))
+    return 0
+
+
+def _clean_text(value, label, limit, single_line=False):
+    value = str(value or "")
+    value = "".join(ch for ch in value if ch in "\n\t" or ord(ch) >= 32).strip()
+    if single_line:
+        value = " ".join(value.split())
+    if not value:
+        raise ConfigError("%s 不能为空" % label)
+    if len(value) > limit:
+        raise ConfigError("%s 不能超过%d字符" % (label, limit))
+    return value
+
+
+def _read_message(args):
+    if args.message is not None:
+        return args.message
+    if args.message_file == "-":
+        return sys.stdin.read(8001)
+    try:
+        with open(args.message_file, "r", encoding="utf-8") as f:
+            return f.read(8001)
+    except (OSError, UnicodeError) as e:
+        raise ConfigError("无法读取 message-file: %s" % e)
+
+
+def cmd_notify(args):
+    cfg = load_config(args.config)
+    _, pusher, _, store = build(cfg, args.verbose)
+    state = store.load(today_str(cfg))
+    budget = cfg["daily_push_budget"]
+    if budget > 0 and state["sent_today"] >= budget:
+        print("推送被全局日预算拦截: %d/%d" % (state["sent_today"], budget))
+        return 3
+    title = _clean_text(args.title, "title", 120, single_line=True)
+    message = _clean_text(_read_message(args), "message", 8000)
+    short = args.short or " ".join(message.split())[:160]
+    short = _clean_text(short, "short", 256, single_line=True)
+    channels = channels_for_level(cfg, args.level, args.channel)
+    res = pusher.send(title, message, short, state=state, only=channels)
+    if res.ok:
+        state["sent_today"] += 1
+        store.save(state)
+        print("推送成功: %s" % ", ".join(res.delivered_channels))
+        return 0
+    store.save(state)
+    print("推送失败: %s" % res.message)
+    return 1
 
 
 def cmd_test_push(args):
@@ -254,6 +388,19 @@ def main(argv=None):
     sp_test.add_argument("--channel", default="all",
                          choices=("all", "serverchan", "ntfy"),
                          help="测试指定通道，默认全部")
+    sp_bells = add("bells", help="腾讯行情与铃铛距离的轻量快查")
+    sp_bells.add_argument("--json", action="store_true", help="输出结构化 JSON")
+    sp_notify = add("notify", help="通过已配置通道发送一条受限文本通知")
+    sp_notify.add_argument("--title", required=True)
+    msg = sp_notify.add_mutually_exclusive_group(required=True)
+    msg.add_argument("--message")
+    msg.add_argument("--message-file", help="UTF-8 文件；- 表示从标准输入读取")
+    sp_notify.add_argument("--short", default="")
+    sp_notify.add_argument("--level", default="default",
+                           help="使用 notification_routes 中的级别")
+    sp_notify.add_argument("--channel", default=None,
+                           choices=("all", "serverchan", "ntfy"),
+                           help="显式覆盖级别路由")
     add("validate", help="校验配置且不显示凭证")
     add("init", help="生成示例配置文件")
     args = p.parse_args(argv)
@@ -264,6 +411,10 @@ def main(argv=None):
             return cmd_check(args)
         if args.cmd == "test-push":
             return cmd_test_push(args)
+        if args.cmd == "bells":
+            return cmd_bells(args)
+        if args.cmd == "notify":
+            return cmd_notify(args)
         if args.cmd == "validate":
             return cmd_validate(args)
         if args.cmd == "init":

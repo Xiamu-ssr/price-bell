@@ -129,6 +129,20 @@ def main():
     ev2, _ = eng.evaluate({"sh600000": Q(9.8)}, state5)
     check("被拦截提醒复位不刷屏", bool(ev) and not chosen and not ev2)
 
+    exit_cfg = dict(CFG)
+    exit_cfg["notify_on_exit_zone"] = True
+    exit_engine = BellEngine(exit_cfg, clock=clock)
+    exit_state = {"date": "20260901", "sent_today": 0, "rules": {}}
+    ev, _ = exit_engine.evaluate({"sh600000": Q(9.9)}, exit_state)
+    exit_engine.mark_sent(ev, exit_state)
+    _, exits = exit_engine.evaluate({"sh600000": Q(10.1)}, exit_state)
+    check("离场事件生成", len(exits) == 1 and exits[0].kind == "exit")
+    _, retry_exits = exit_engine.evaluate({"sh600000": Q(10.2)}, exit_state)
+    check("离场发送失败自动补发", len(retry_exits) == 1)
+    exit_engine.mark_sent(retry_exits, exit_state)
+    _, done_exits = exit_engine.evaluate({"sh600000": Q(10.2)}, exit_state)
+    check("离场发送成功后不再重复", not done_exits)
+
     print()
     if FAILED:
         print("失败 %d 项: %s" % (len(FAILED), FAILED))
